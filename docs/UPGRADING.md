@@ -40,6 +40,36 @@ docker compose -f docker-compose.arr-stack.yml up -d  # Restarts containers with
 
 When upgrading across versions, check below for any action required.
 
+### v1.18.0 → Unreleased
+
+dnscrypt-proxy's config now lives in the repo as `dnscrypt-proxy/dnscrypt-proxy.toml`, bind-mounted read-only over the copy in the `dnscrypt-config` volume. It is the image default plus `disabled_server_names = ['yunzheng-dns64']`, a DNS64 resolver in the public pool whose synthesised `64:ff9b::/96` answers nothing on a dual-stack LAN can route. `git pull` brings the file; recreating the service applies the mount:
+
+```bash
+cd $NAS_STACK_DIR && git pull
+docker compose -f docker-compose.arr-stack.yml up -d --no-deps dnscrypt-proxy
+```
+
+Pi-hole answers from its cache while dnscrypt-proxy comes back (about 25 seconds to a full server list). An answer Pi-hole already cached from the DNS64 resolver expires with its TTL; `docker exec pihole pihole reloaddns` flushes the cache now without restarting the DNS server.
+
+If you keep a customised copy of `docker-compose.arr-stack.yml`, add the second line to the service's `volumes:` yourself before the `up -d`:
+
+```yaml
+    volumes:
+      - dnscrypt-config:/config
+      - ./dnscrypt-proxy/dnscrypt-proxy.toml:/config/dnscrypt-proxy.toml:ro
+```
+
+Or leave compose alone and change the copy in the volume. The image has no shell, so copy the file out and back:
+
+```bash
+docker cp dnscrypt-proxy:/config/dnscrypt-proxy.toml /tmp/dnscrypt-proxy.toml
+sed -i "s/^disabled_server_names = \[\]/disabled_server_names = ['yunzheng-dns64']/" /tmp/dnscrypt-proxy.toml
+docker cp /tmp/dnscrypt-proxy.toml dnscrypt-proxy:/config/dnscrypt-proxy.toml
+docker compose -f docker-compose.arr-stack.yml restart dnscrypt-proxy
+```
+
+That edit lives in the volume and is lost when the volume is recreated; the mount is the durable fix.
+
 ### v1.17.0 → v1.18.0
 
 Eight image bumps. Pi-hole's gravity database migration is one-way and qBittorrent rewrites its config file to a newer layout, so back up those two volumes first, with the services stopped. Jellyfin 12.3 runs no migration; back it up only if you want to, and know that `jellyfin-config` is about 4 GB (almost all `metadata/`), so a gzip takes around 12 minutes on a NAS CPU with Jellyfin down. Use `tar cf` or `--exclude=./metadata`. Check that nothing is playing or downloading first: recreating Pi-hole takes every `.lan` name and LAN DNS down for about 35 seconds, and stopping qBittorrent pauses its downloads.
