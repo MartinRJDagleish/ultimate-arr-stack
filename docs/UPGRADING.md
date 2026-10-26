@@ -49,7 +49,7 @@ cd $NAS_STACK_DIR && git pull
 docker compose -f docker-compose.arr-stack.yml up -d --no-deps dnscrypt-proxy
 ```
 
-Pi-hole answers from its cache while dnscrypt-proxy comes back (about 25 seconds to a full server list). An answer Pi-hole already cached from the DNS64 resolver expires with its TTL; `docker exec pihole pihole reloaddns` flushes the cache now without restarting the DNS server.
+Pi-hole answers from its cache while dnscrypt-proxy comes back (about 25 seconds to a full server list). An answer Pi-hole already cached from the DNS64 resolver expires with its TTL; `docker exec -u pihole pihole pihole reloaddns` flushes the cache now without restarting the DNS server (as the `pihole` user: FTL runs as that user, and with every capability dropped root in the container can't signal it).
 
 If you keep a customised copy of `docker-compose.arr-stack.yml`, add the `group_add` and the second `volumes:` line to the service yourself before the `up -d`. The group matters on a NAS whose shares admit only its own accounts (UGOS): without it the image's uid 65532 gets `permission denied` on the mounted file and the container restart-loops, leaving Pi-hole with no upstream.
 
