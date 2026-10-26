@@ -439,6 +439,8 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    group_add:
+      - "${PGID}"  # the toml below is read from the checkout; a NAS share that admits only its own accounts (UGOS does) refuses the image's uid 65532 without a group it knows
     networks:
       arr-stack:
         ipv4_address: 172.20.0.6
