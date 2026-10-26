@@ -11,6 +11,17 @@ All notable changes to this project will be documented in this file.
 
 Eight image bumps, three of them security releases: Pi-hole closes 17 advisories, qBittorrent closes a WebUI authentication bypass, and Uptime Kuma, Tailscale and cloudflared are rebuilt to distrust the compromised eMudhra certificate authority.
 
+### Security
+**If you run cloudflared for remote access, upgrade it now.** cloudflared before 2026.10.2 trusts eight eMudhra intermediate certificates whose private keys are weak enough to recover, so anyone holding them can forge a certificate for any name and, from a position on the path between your NAS and Cloudflare, impersonate Cloudflare's edge to your tunnel. Cloudflare's review has found no exploitation, and it is emailing every account that runs a tunnel to ask for the upgrade ([Cloudflare's write-up, 20 October](https://blog.cloudflare.com/emudhra-certificate-compromise/)). This release pins `cloudflare/cloudflared:2026.10.3`, past the fix. Pull and recreate it through its own compose file; a container restarted on the old image is not fixed:
+
+```bash
+docker compose -f docker-compose.cloudflared.yml pull cloudflared
+docker compose -f docker-compose.cloudflared.yml up -d --no-deps cloudflared
+docker exec cloudflared cloudflared --version   # cloudflared version 2026.10.3
+```
+
+The Cloudflare dashboard shows the same version under Networking → Tunnels → your tunnel's connectors. If an HTTPS origin of yours fails verification afterwards, replace its certificate rather than setting `noTLSVerify`; the stack's own ingress rules point at plain HTTP, so that does not arise here. Tailscale 1.104.2 and Uptime Kuma 2.5.7 in this release are the same rebuild for their own TLS clients.
+
 ### Changed
 - **Eight image bumps.** jellyfin `12.2`→`12.3`, qbittorrent `5.2.4`→`5.3.0`, pihole `2026.09.0`→`2026.10.0`, cloudflared `2026.10.0`→`2026.10.3`, tailscale `v1.102.5`→`v1.104.2`, uptime-kuma `2.5.6`→`2.5.7`, dnscrypt-proxy `2.1.18`→`2.1.20`, configarr `1.34.1`→`1.36.0`. Each config volume was backed up with its service stopped, and each service was compared with a snapshot of its settings taken through its API before the bump. Jellyfin's libraries, users, item count, scheduled tasks and `encoding.xml`; qBittorrent's port, server domains, auth whitelist, categories and VueTorrent; Pi-hole's lists, domains, groups, clients and config; Kuma's monitors and notification; Tailscale's identity, routes and exit node; and dnscrypt-proxy's DNSSEC and NXDOMAIN answers all came out identical, apart from the settings each new version adds.
   - **Pi-hole 2026.10.0 migrates the gravity database one way** (schema 20→21; FTL v6.8, Web v6.6.1, Core v6.5) and closes **17 security advisories**, five of them High: an authenticated file read and four local escalations to root. Two FTL 6.8 behaviour changes reach this stack. `http://pihole.lan/` now answers 404 instead of redirecting, so use `/admin/` (Kuma's monitor and the e2e tests already do). And queries older than `database.maxDBdays` (91) are deleted in the first night after a start, 10,000 at a time, so a `pihole-FTL.db` that kept growing will shrink. Recreating Pi-hole takes LAN DNS down for about 35 seconds; an uncompressed backup (`tar cf`) keeps that short. Core v6.5 also tightens file modes under `/etc/pihole` (`gravity.db` is now 640).
