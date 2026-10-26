@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **dnscrypt-proxy could hand Pi-hole NAT64 addresses that nothing on the LAN can route.** The image's default config leaves `server_names` unset, so every resolver in the public list that is DNSSEC, no-log and no-filter is in the pool (335 live on 26 October 2026), and the load balancer's estimator keeps trying the idle ones. One of them, `yunzheng-dns64`, is a DNS64 resolver (RFC 6147): a name with no AAAA record is answered with one synthesised in `64:ff9b::/96`, meant for IPv6-only networks with a NAT64 gateway. Whenever it was picked, Pi-hole cached that answer for every client, and an IPv6-first client then hung on an IPv4-only host: `api.gitguardian.com` came back as `64:ff9b::6812:fb0` and stalled a pre-commit secret scan. The config now ships in the repo as `dnscrypt-proxy/dnscrypt-proxy.toml`, the image default with `disabled_server_names = ['yunzheng-dns64']`, bind-mounted read-only over the copy in the `dnscrypt-config` volume; the volume keeps only the resolver-list cache. The service also joins group `PGID`: a UGOS share admits only the NAS's own accounts and groups, whatever the file's mode bits say, so the image's uid 65532 was refused the mounted file (`open /config/dnscrypt-proxy.toml: permission denied`, restart loop, Pi-hole without an upstream) until it carried a group the share knows, as the *arr services already do. With the pinned image the startup latency list has no `yunzheng-dns64`, `api.gitguardian.com` gets no AAAA answer, `www.google.com` still gets its native ones, and a run pinned to `yunzheng-dns64` alone reproduces the synthesised address. A denylist is the smallest change: a curated `server_names` list would also shut out any DNS64 resolver that joins the list later, at the cost of picking resolvers by hand and losing the pool. Existing installs: see `docs/UPGRADING.md`.
+
 ## [1.18.0] - 2026-10-24
 
 Eight image bumps, three of them security releases: Pi-hole closes 17 advisories, qBittorrent closes a WebUI authentication bypass, and Uptime Kuma, Tailscale and cloudflared are rebuilt to distrust the compromised eMudhra certificate authority.
