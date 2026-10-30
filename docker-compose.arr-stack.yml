@@ -430,6 +430,7 @@ services:
   # DNSCRYPT-PROXY - DNS over HTTPS/DNSCrypt proxy. Encrypts DNS queries.
   # No web UI. Used internally by Pi-hole at 172.20.0.6:5053
   # Protocols: DoH (DNS over HTTPS), DNSCrypt, Anonymized DNS
+  # Config: dnscrypt-proxy/dnscrypt-proxy.toml (the image default, plus a denylist of DNS64 resolvers)
   # ═══════════════════════════════════════════════════════════════════════════
   dnscrypt-proxy:
     image: klutchell/dnscrypt-proxy:2.1.20
@@ -438,11 +439,14 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    group_add:
+      - "${PGID}"  # the toml below is read from the checkout; a NAS share that admits only its own accounts (UGOS does) refuses the image's uid 65532 without a group it knows
     networks:
       arr-stack:
         ipv4_address: 172.20.0.6
     volumes:
-      - dnscrypt-config:/config
+      - dnscrypt-config:/config  # resolver-list cache (public-resolvers.md, relays.md, .minisig)
+      - ./dnscrypt-proxy/dnscrypt-proxy.toml:/config/dnscrypt-proxy.toml:ro  # the file only: the volume keeps the cache beside it
     environment:
       - TZ=${TZ}
     restart: always

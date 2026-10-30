@@ -2,9 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **dnscrypt-proxy could hand Pi-hole NAT64 addresses that nothing on the LAN can route.** The image's default config leaves `server_names` unset, so every resolver in the public list that is DNSSEC, no-log and no-filter is in the pool (335 live on 26 October 2026), and the load balancer's estimator keeps trying the idle ones. One of them, `yunzheng-dns64`, is a DNS64 resolver (RFC 6147): a name with no AAAA record is answered with one synthesised in `64:ff9b::/96`, meant for IPv6-only networks with a NAT64 gateway. Whenever it was picked, Pi-hole cached that answer for every client, and an IPv6-first client then hung on an IPv4-only host: `api.gitguardian.com` came back as `64:ff9b::6812:fb0` and stalled a pre-commit secret scan. The config now ships in the repo as `dnscrypt-proxy/dnscrypt-proxy.toml`, the image default with `disabled_server_names = ['yunzheng-dns64']`, bind-mounted read-only over the copy in the `dnscrypt-config` volume; the volume keeps only the resolver-list cache. The service also joins group `PGID`: a UGOS share admits only the NAS's own accounts and groups, whatever the file's mode bits say, so the image's uid 65532 was refused the mounted file (`open /config/dnscrypt-proxy.toml: permission denied`, restart loop, Pi-hole without an upstream) until it carried a group the share knows, as the *arr services already do. With the pinned image the startup latency list has no `yunzheng-dns64`, `api.gitguardian.com` gets no AAAA answer, `www.google.com` still gets its native ones, and a run pinned to `yunzheng-dns64` alone reproduces the synthesised address. A denylist is the smallest change: a curated `server_names` list would also shut out any DNS64 resolver that joins the list later, at the cost of picking resolvers by hand and losing the pool. Existing installs: see `docs/UPGRADING.md`.
+
 ## [1.18.0] - 2026-10-24
 
 Eight image bumps, three of them security releases: Pi-hole closes 17 advisories, qBittorrent closes a WebUI authentication bypass, and Uptime Kuma, Tailscale and cloudflared are rebuilt to distrust the compromised eMudhra certificate authority.
+
+### Security
+**If you run cloudflared for remote access, upgrade it now.** cloudflared before 2026.10.2 trusts eight eMudhra intermediate certificates whose private keys are weak enough to recover, so anyone holding them can forge a certificate for any name and, from a position on the path between your NAS and Cloudflare, impersonate Cloudflare's edge to your tunnel. Cloudflare's review has found no exploitation, and it is emailing every account that runs a tunnel to ask for the upgrade ([Cloudflare's write-up, 20 October](https://blog.cloudflare.com/emudhra-certificate-compromise/)). This release pins `cloudflare/cloudflared:2026.10.3`, past the fix. Pull and recreate it through its own compose file; a container restarted on the old image is not fixed:
+
+```bash
+docker compose -f docker-compose.cloudflared.yml pull cloudflared
+docker compose -f docker-compose.cloudflared.yml up -d --no-deps cloudflared
+docker exec cloudflared cloudflared --version   # cloudflared version 2026.10.3
+```
+
+The Cloudflare dashboard shows the same version under Networking → Tunnels → your tunnel's connectors. If an HTTPS origin of yours fails verification afterwards, replace its certificate rather than setting `noTLSVerify`; the stack's own ingress rules point at plain HTTP, so that does not arise here. Tailscale 1.104.2 and Uptime Kuma 2.5.7 in this release are the same rebuild for their own TLS clients.
 
 ### Changed
 - **Eight image bumps.** jellyfin `12.2`→`12.3`, qbittorrent `5.2.4`→`5.3.0`, pihole `2026.09.0`→`2026.10.0`, cloudflared `2026.10.0`→`2026.10.3`, tailscale `v1.102.5`→`v1.104.2`, uptime-kuma `2.5.6`→`2.5.7`, dnscrypt-proxy `2.1.18`→`2.1.20`, configarr `1.34.1`→`1.36.0`. Each config volume was backed up with its service stopped, and each service was compared with a snapshot of its settings taken through its API before the bump. Jellyfin's libraries, users, item count, scheduled tasks and `encoding.xml`; qBittorrent's port, server domains, auth whitelist, categories and VueTorrent; Pi-hole's lists, domains, groups, clients and config; Kuma's monitors and notification; Tailscale's identity, routes and exit node; and dnscrypt-proxy's DNSSEC and NXDOMAIN answers all came out identical, apart from the settings each new version adds.

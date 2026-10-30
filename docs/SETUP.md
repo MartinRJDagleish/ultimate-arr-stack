@@ -107,6 +107,7 @@ Decide how you'll access your media stack:
 **Files you DON'T edit:**
 - `docker-compose.*.yml` - Work as-is, configured via `.env`
 - `pihole/dnsmasq.d/02-local-dns.conf` - Generated from example via sed command
+- `dnscrypt-proxy/dnscrypt-proxy.toml` - dnscrypt-proxy's config: the image default plus a denylist of DNS64 resolvers
 - `traefik/dynamic/tls.yml` - Security defaults
 - `traefik/dynamic/local-services.yml` - Ready-made `.lan` routes to the fixed container IPs (reads nothing from `.env`)
 
