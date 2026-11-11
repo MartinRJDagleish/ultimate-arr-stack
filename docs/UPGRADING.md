@@ -72,6 +72,69 @@ docker compose -f docker-compose.arr-stack.yml restart dnscrypt-proxy
 
 That edit lives in the volume and is lost when the volume is recreated; the mount is the durable fix.
 
+`configure-apps.sh` now sets each Sonarr and Radarr quality profile's **Upgrade Until Custom Format Score** to `500`, the `DV HDR10 (Profile 8.1)` score, so an 8.1 release can replace a file already on disk. Nothing to recreate. Apply it to a running stack with:
+
+```bash
+cd $NAS_STACK_DIR && git pull
+./scripts/configure-apps.sh --only sonarr --dry-run
+./scripts/configure-apps.sh --only sonarr
+./scripts/configure-apps.sh --only radarr
+```
+
+It only ever raises the score, so a profile you set higher yourself is left alone. Or set it by hand: Settings → Profiles → your quality profile → **Upgrade Until Custom Format Score** = `500`. Files already in the library are replaced only when an 8.1 release of the same quality appears in RSS. To swap the ones that matter now, find them with `find tv movies -name '*HDR10Plus*' ! -name '*DV*'` under your media root and grab an 8.1 release from each one's interactive search.
+
+The same commands add the `HDR10+ (no DV)` custom format to Sonarr and Radarr and score it `-1000` in every profile, so a 4K HDR10+ release without Dolby Vision is refused instead of grabbed as an upgrade. Nothing to recreate. To add it by hand, follow [Sonarr step 9](APP-CONFIG.md#44-sonarr-tv-shows) in both apps. Files already in the library from a matching release now score `-1000`, so the next same-quality release that scores 0 or more replaces them on its own. If you kept a 1080p file in place of an HDR10+-only 4K one, you can leave it monitored now.
+
+The same commands also set **Propers and Repacks** to `Do not Prefer` in Sonarr and Radarr, and score the `Repack/Proper`, `Repack2` and `Repack3` custom formats `5`, `6` and `7` in every profile (adding them if absent), so a PROPER no longer outranks a Dolby Vision 8.1 release. Nothing to recreate. If you set propers to something else on purpose, the run replaces it: no other mode lets the scores decide. To do it by hand, follow [Sonarr step 10](APP-CONFIG.md#44-sonarr-tv-shows) in both apps.
+
+`configure-apps.sh` now adds a `Foreign dub first` custom format to Radarr and scores it `-1000` in every profile, so a release that names a dub before English (`iTA-ENG`, `Ita.Eng`, `[TR-EN]`) or is marked `DUAL` is refused. Those releases default to the dub. Nothing to recreate:
+
+```bash
+./scripts/configure-apps.sh --only radarr --dry-run
+./scripts/configure-apps.sh --only radarr
+```
+
+To add it by hand, follow [Radarr step 11](APP-CONFIG.md#45-radarr-movies). Films already in the library from a matching release now score `-1000`, so the next English release of the same quality that RSS finds replaces them on its own. To swap one now, open its interactive search and grab a release of the same quality or better. Until then, a film from such a release still starts in the dub. CYBER, NAHOM and TURG were the common groups.
+
+`configure-apps.sh` now keeps UHD Blu-ray remuxes (Dolby Vision Profile 7) out of the `DV HDR10 (Profile 8.1)` score, adds a `DTS 6.1` custom format scored `-1000`, and brings any format it owns back in line with the repo when its conditions differ. Nothing to recreate:
+
+```bash
+./scripts/configure-apps.sh --only sonarr --dry-run
+./scripts/configure-apps.sh --only sonarr
+./scripts/configure-apps.sh --only radarr
+```
+
+The dry run lists each format whose conditions it would replace. If you edited one of the script's formats by hand, that edit goes. To change the 8.1 format by hand instead, follow [Sonarr step 8](APP-CONFIG.md#44-sonarr-tv-shows) (its third condition) and [step 11](APP-CONFIG.md#44-sonarr-tv-shows) in both apps. A Profile 7 remux already in the library drops from 500 to 0. It stays, and is replaced only if a converted 8.1 remux of the same film turns up in RSS.
+
+`scripts/check-playback-formats.sh` is new: it reads Sonarr's and Radarr's mediainfo for files the Jellyfin Android TV client can't play (Dolby Vision Profile 5, DTS 6.1) and posts one panel notice. Run it once by hand, then add the weekly cron line from [MAINTENANCE.md](MAINTENANCE.md#playback-formats):
+
+```bash
+./scripts/check-playback-formats.sh -v
+./scripts/check-playback-formats.sh --test
+```
+
+If you use Home Assistant, `configure-apps.sh` now points Bazarr's notifications at `HA_WEBHOOK_URL` in `.env`, the webhook everything else uses. Nothing to recreate:
+
+```bash
+./scripts/configure-apps.sh --only bazarr --dry-run
+./scripts/configure-apps.sh --only bazarr
+```
+
+It replaces a JSON notifier that points at any Home Assistant webhook, such as an old `json://homeassistant.lan:8123/…`, which a container can't reach. It leaves alone a JSON notifier pointed at anything else, and one you switched off. Then send Bazarr's test (Settings → Notifications → **JSON** → **Test**) and look for it in the Home Assistant panel.
+
+Seven image bumps arrive with the same `git pull` and need nothing beyond a pull and an `up -d` per compose file. Two of them change behaviour you may rely on:
+
+- **Uptime Kuma 2.5.8 removes TLS from the TCP Port monitor.** A TCP monitor that had TLS switched on becomes a plain port check and stops checking the certificate. Look at your TCP monitors before upgrading, and replace any you need with an HTTP(S) monitor (which checks certificate expiry). The stack's own monitors are all HTTP or push, so nothing changes for them.
+- **Prowlarr 2.7.0 drops `0.0.0.0` and `[::]` from Allowed Hosts** and logs "Ignoring … in Allowed Hosts, bind addresses are not host names". If those were the only entries, the list is now empty and Prowlarr accepts any Host header, as it does when the setting is left blank (the default here). Put real hostnames there if you meant to filter.
+
+`check-vpn.sh` now says why gluetun can't get out, read from gluetun's log, and can put that into Uptime Kuma's *VPN Check is down* notice. The new lines arrive with the `git pull`; nothing to recreate. The notice is opt-in: add your cron line's push URL to `.env`, without its query, and leave the cron line as it is:
+
+```bash
+echo 'VPN_CHECK_PUSH_URL=http://localhost:3001/api/push/YOUR_TOKEN' >> $NAS_STACK_DIR/.env
+```
+
+Home Assistant can fold a VPN outage's follow-on notices into the *VPN Check is down* notice ([HOME-ASSISTANT.md, Step 1b](HOME-ASSISTANT.md#step-1b-make-a-vpn-outage-one-notice-recommended)). Replace your automation with `docs/HOME-ASSISTANT-notifications.yaml` (keep your two `CHANGE-ME` values), and add the sensor in `docs/HOME-ASSISTANT-vpn-fold.yaml`. Check that Sonarr and Radarr's webhook has **On Health Restored** ticked: one install had it off in both, so no health warning ever cleared.
+
 ### v1.17.0 → v1.18.0
 
 Eight image bumps. Pi-hole's gravity database migration is one-way and qBittorrent rewrites its config file to a newer layout, so back up those two volumes first, with the services stopped. Jellyfin 12.3 runs no migration; back it up only if you want to, and know that `jellyfin-config` is about 4 GB (almost all `metadata/`), so a gzip takes around 12 minutes on a NAS CPU with Jellyfin down. Use `tar cf` or `--exclude=./metadata`. Check that nothing is playing or downloading first: recreating Pi-hole takes every `.lan` name and LAN DNS down for about 35 seconds, and stopping qBittorrent pauses its downloads.

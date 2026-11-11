@@ -289,19 +289,161 @@ bazarr_settings_post() {
     return 1
 }
 
+# The apprise URL for Bazarr's JSON notifier that posts to a Home Assistant
+# webhook (HA_WEBHOOK_URL, http[s]://<host>:<port>/api/webhook/<id>) with the
+# body every sender uses: {"title", "message", "level"}, as application/json.
+#
+# The ":" arguments are apprise's payload remaps. ":type=level" renames the
+# message type (Bazarr always sends "info") to `level`; an empty value drops
+# the key, so `version` and `attachments` go. Checked against the apprise
+# 1.11.0 bundled in Bazarr 1.6.2, 2026-11-07: the payload came out as exactly
+# {"title", "message", "level": "info"}.
+#
+# Prints the URL; returns 1 for anything that isn't a webhook URL.
+bazarr_ha_notifier_url() {
+    local url="$1" scheme rest
+    case "$url" in
+        http://*)  scheme=json;  rest="${url#http://}" ;;
+        https://*) scheme=jsons; rest="${url#https://}" ;;
+        *) return 1 ;;
+    esac
+    [[ "$rest" =~ ^[^/?#]+/api/webhook/[^/?#]+$ ]] || return 1
+    echo "${scheme}://${rest}?:type=level&:version=&:attachments="
+}
+
+# Where Bazarr's JSON notifier stands against the URL it should have. Prints
+#   MATCH        enabled, with exactly this URL
+#   OFF          this URL, but switched off (by hand: the script never does)
+#   FOREIGN      a URL that isn't a Home Assistant webhook
+#   NO_JSON      no JSON notifier in this Bazarr at all
+#   <fields>     what differs: "enabled", "url" or both
+# and nothing when the settings don't parse.
+bazarr_notifier_state() {
+    local settings="$1" want="$2"
+    json_extract "$settings" "
+want = '''${want}'''
+rows = [p for p in data['notifications']['providers'] if p.get('name') == 'JSON']
+if not rows:
+    print('NO_JSON'); sys.exit()
+url, enabled = rows[0].get('url') or '', rows[0].get('enabled') is True
+if url and '/api/webhook/' not in url:
+    print('FOREIGN')
+elif url == want:
+    print('MATCH' if enabled else 'OFF')
+else:
+    print(' '.join(([] if enabled else ['enabled']) + ['url']))"
+}
+
+# Point Bazarr's notifications at the stack's Home Assistant webhook.
+#
+# Usage:
+#   ensure_bazarr_ha_notifier "$BASE" "$AUTH" "$settings" "$HA_WEBHOOK_URL"
+#
+# The script owns Bazarr's JSON notifier while it points at a Home Assistant
+# webhook, so a stale one is replaced: on one install it was
+# json://homeassistant.lan:8123/…, which from inside a container is Traefik's
+# macvlan (docs/REFERENCE.md), and every notification was refused. A JSON
+# notifier pointed anywhere else is someone's own, and one switched off by
+# hand stays off; both are left alone rather than fought on every run.
+#
+# Bazarr's settings POST updates the notifier row by name and answers 204
+# whether or not a row matched, so the result is read back, not trusted.
+ensure_bazarr_ha_notifier() {
+    local BASE="$1" AUTH="$2" settings="$3" webhook="$4"
+
+    local want host state
+    if ! want=$(bazarr_ha_notifier_url "$webhook"); then
+        fail "Bazarr: notifications — HA_WEBHOOK_URL is not an http(s)://<host>:<port>/api/webhook/<id> URL"
+        return
+    fi
+    host="${want#*://}"; host="${host%%/*}"
+
+    state=$(bazarr_notifier_state "$settings" "$want")
+    case "$state" in
+        MATCH)   skip "Bazarr: notifications to Home Assistant at ${host}"; return ;;
+        OFF)     info "Bazarr: notifications to Home Assistant are switched off in Bazarr — left off"; return ;;
+        FOREIGN) info "Bazarr: notifications — its JSON notifier points somewhere other than a Home Assistant webhook — left alone"; return ;;
+        NO_JSON) fail "Bazarr: notifications — this Bazarr has no JSON notifier"; return ;;
+        "")      fail "Bazarr: could not compare notification settings"; return ;;
+    esac
+
+    local row
+    row=$(python3 -c 'import json, sys; print(json.dumps({"name": "JSON", "enabled": True, "url": sys.argv[1]}))' "$want")
+    if ! bazarr_settings_post "$BASE" "$AUTH" "notifications-providers=${row}"; then
+        fail "Bazarr: point notifications at Home Assistant"
+        return
+    fi
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        ok "Bazarr: point notifications at Home Assistant at ${host} (${state})"
+        return
+    fi
+
+    local after
+    after=$(bazarr_notifier_state "$(api_get "${BASE}/api/system/settings" "$AUTH" || true)" "$want")
+    if [[ "$after" == "MATCH" ]]; then
+        ok "Bazarr: pointed notifications at Home Assistant at ${host} (${state})"
+    else
+        fail "Bazarr: notifications — the write was accepted but the notifier reads back as '${after:-unreadable}'"
+    fi
+}
+
 # ============================================
 # Custom formats
 # ============================================
 
-# Ensure a custom format exists and is scored in every quality profile.
+# Release titles that mean HDR10+: an explicit tag, or a bare "HDR" from a
+# service that streams HDR10+ (Amazon, Apple TV+, Paramount+). The (?<!\[)
+# keeps the file's own name out of it. Sonarr and Radarr name a file
+# "[HDR10Plus]" from its mediainfo, and a custom format matches the file name
+# as well as the release title. If the name matched, a scene "HDR" file would
+# score below the release it came from once imported, every other release
+# would then look like an upgrade, and each would be downloaded in turn.
+HDR10PLUS_TITLE_RE='(?<!\[)\bhdr10(\+|p\b|[ .\-_]?plus\b)|\b(amzn|atvp|pmtp)\b.*\bhdr\b|\bhdr\b.*\b(amzn|atvp|pmtp)\b'
+
+# Release titles that put a dub ahead of English: the dub is named first
+# ("iTA-ENG", "Ita.Eng", "[TR-EN]") or the release is marked DUAL. Groups
+# name the tracks in their order, so an English-first release ("Eng.Rus",
+# "Eng.Fre.Ger...") is left alone. The (?<!^) keeps a film called "Dual"
+# from matching its own title. A file's own name carries no language, so a
+# file scores what its release did.
+FOREIGN_DUB_TITLE_RE='\b(ita|tr|tur|spa|esp|fre|fra|ger|rus|ukr|hin|pol|por)[ .\-_]+eng?\b|(?<!^)\bdual\b'
+
+# Remux titles, except those marked as converted to Dolby Vision Profile 8
+# (HYBRID, P8, "For LG TVs"). A UHD Blu-ray remux keeps the disc's Profile 7:
+# in one library 18 of 22 Dolby Vision remuxes were Profile 7 and this
+# scores 20 of the 22 right (the misses: a file with no release name, and a
+# Profile 8 BDRemux that Foreign dub first refuses anyway), while 46 of 47
+# Dolby Vision Blu-ray encodes were Profile 8 or 10. The Jellyfin Android TV client on a Fire TV can't
+# play Profile 7, so Jellyfin transcodes it and tone-maps the picture to SDR.
+# The trailing (?![^\[]*\]) skips a "Remux" inside brackets, which is the
+# file's own name ("[Remux-2160p]", "[Bluray-2160p Remux]"). A condition
+# matches the release title or the file name, so without it a HYBRID remux
+# would lose the 8.1 score once renamed and every other 8.1 release of the
+# film would look like an upgrade.
+REMUX_P7_TITLE_RE='^(?!.*\b(hybrid|p8|dvp8|for[ .\-_]?lg[ .\-_]?tvs?)\b).*\b(bd)?remux\b(?![^\[]*\])'
+
+# Release titles with a DTS 6.1 track: DTS-HD MA 6.1, DTS 6.1 or DTS-ES. The
+# track's core is 6.1 too, and the Jellyfin Android TV client on a Fire TV
+# stopped at 0 ms on one (it passes DTS through as the core), where a 7.1
+# track with a 5.1 core played. The (?<!\[) keeps a file's own "[DTS-HD MA
+# 6.1]" name out of it, as with HDR10+, so a file scores what its release did
+# and a 6.1 file arriving under a title that hid it can't set off a run of
+# re-downloads. check-playback-formats.sh finds those files instead.
+DTS_61_TITLE_RE='(?<!\[)\bdts([ .\-_]?(hd|ma|es))*[ .\-_]?6[ .]1\b|(?<!\[)\bdts[ .\-_]?es\b'
+
+# Ensure a custom format exists, with these conditions, and is scored in
+# every quality profile.
 #
 # Usage:
 #   ensure_custom_format "$BASE" "$AUTH" "Sonarr" "Reject ISO" -10000 "$specs_json"
 #
-# Idempotent on both halves: the format is created only when absent, and a
-# quality profile is only PUT when its score for that format is missing or
-# wrong. Existing specifications are left alone — if you change a regex here,
-# update it in the running service too, or repo and live silently diverge.
+# Idempotent on all three: the format is created when absent, its conditions
+# are replaced when they differ from these (compared by name, type, negate,
+# required and value), and a quality profile is only PUT when its score for
+# the format is missing or wrong. The script owns the formats it names, so a
+# condition edited by hand in the app is put back. Until conditions were
+# compared, a regex changed here never reached a running service, and repo
+# and live diverged without a word.
 ensure_custom_format() {
     local BASE="$1" AUTH="$2" name="$3" cf_name="$4" cf_score="$5" cf_specs="$6"
 
@@ -312,7 +454,29 @@ ids = [c['id'] for c in data if c.get('name') == '''${cf_name}''']
 print(ids[0] if ids else '')")
 
     if [[ -n "$cf_id" ]]; then
-        skip "${name}: ${cf_name} custom format"
+        local updated_cf
+        updated_cf=$(CF_SPECS="$cf_specs" json_extract "$formats" "
+import os
+want = json.loads(os.environ['CF_SPECS'])
+cf = [c for c in data if c.get('id') == ${cf_id}][0]
+def value(spec):
+    fields = spec.get('fields') or []
+    if isinstance(fields, dict):
+        return fields.get('value')
+    return next((f.get('value') for f in fields if f.get('name') == 'value'), None)
+def norm(specs):
+    return sorted(repr((s.get('name'), s.get('implementation'), bool(s.get('negate')),
+                        bool(s.get('required')), value(s))) for s in specs)
+if norm(cf.get('specifications') or []) != norm(want):
+    cf['specifications'] = want
+    print(json.dumps(cf))")
+        if [[ -z "$updated_cf" ]]; then
+            skip "${name}: ${cf_name} custom format"
+        elif api_put "${BASE}/api/v3/customformat/${cf_id}" "application/json" "$updated_cf" "$AUTH" >/dev/null 2>&1; then
+            ok "${name}: updated ${cf_name} custom format's conditions"
+        else
+            fail "${name}: update ${cf_name} custom format's conditions"
+        fi
     else
         local cf_payload cf_result
         cf_payload="{\"name\":\"${cf_name}\",\"includeCustomFormatWhenRenaming\":false,\"specifications\":${cf_specs}}"
@@ -360,6 +524,76 @@ print(json.dumps(data))")
             fail "${name}: score ${cf_name} in profile ${pid}"
         fi
     done
+}
+
+# Raise every quality profile's "Upgrade Until Custom Format Score" to at
+# least the given score.
+#
+# Usage:
+#   ensure_cutoff_format_score "$BASE" "$AUTH" "Sonarr" 500
+#
+# Only ever raises. A profile already set higher (configarr's until_score,
+# say) is left alone, so this never fights a deliberate choice.
+ensure_cutoff_format_score() {
+    local BASE="$1" AUTH="$2" name="$3" cutoff="$4"
+
+    local profiles profile_ids
+    profiles=$(api_get "${BASE}/api/v3/qualityprofile" "$AUTH") || true
+    profile_ids=$(json_extract "$profiles" "
+for p in data:
+    print(p['id'])")
+
+    local pid profile updated_profile raised=0
+    for pid in $profile_ids; do
+        profile=$(api_get "${BASE}/api/v3/qualityprofile/${pid}" "$AUTH") || continue
+        if json_extract "$profile" "sys.exit(0 if data.get('cutoffFormatScore', 0) >= ${cutoff} else 1)"; then
+            continue
+        fi
+        raised=1
+        updated_profile=$(json_extract "$profile" "
+data['cutoffFormatScore'] = ${cutoff}
+print(json.dumps(data))")
+        if api_put "${BASE}/api/v3/qualityprofile/${pid}" "application/json" "$updated_profile" "$AUTH" >/dev/null 2>&1; then
+            ok "${name}: profile ${pid} upgrades until custom format score ${cutoff}"
+        else
+            fail "${name}: raise profile ${pid}'s upgrade-until custom format score to ${cutoff}"
+        fi
+    done
+    if [[ $raised -eq 0 ]]; then
+        skip "${name}: upgrade until custom format score ${cutoff}"
+    fi
+}
+
+# Set Settings → Media Management → "Propers and Repacks" to "Do not Prefer".
+#
+# Usage:
+#   ensure_propers_not_preferred "$BASE" "$AUTH" "Sonarr"
+#
+# Any other mode compares a release's revision before its custom format score,
+# so a PROPER outranks every score. The Repack/Proper formats scored in
+# configure_arr_service rank repacks instead. Any other value is replaced,
+# because no other mode lets those scores decide.
+ensure_propers_not_preferred() {
+    local BASE="$1" AUTH="$2" name="$3"
+
+    local mm updated
+    mm=$(api_get "${BASE}/api/v3/config/mediamanagement" "$AUTH") || true
+    if ! json_extract "$mm" "sys.exit(0 if 'downloadPropersAndRepacks' in data else 1)"; then
+        fail "${name}: read media management settings"
+        return
+    fi
+    if json_extract "$mm" "sys.exit(0 if data['downloadPropersAndRepacks'] == 'doNotPrefer' else 1)"; then
+        skip "${name}: propers and repacks ranked by score (Do not Prefer)"
+        return
+    fi
+    updated=$(json_extract "$mm" "
+data['downloadPropersAndRepacks'] = 'doNotPrefer'
+print(json.dumps(data))")
+    if api_put "${BASE}/api/v3/config/mediamanagement" "application/json" "$updated" "$AUTH" >/dev/null 2>&1; then
+        ok "${name}: propers and repacks ranked by score (Do not Prefer)"
+    else
+        fail "${name}: set propers and repacks to Do not Prefer"
+    fi
 }
 
 # ============================================
@@ -562,15 +796,125 @@ print(str(xbmc[0].get('enable', False)).lower() if xbmc else 'false')")
     # With minFormatScore at 0 the -1000 is a functional reject, not just a
     # preference: Profile 5 releases are refused and the next-best release is
     # taken instead.
+    #
+    # Profile 7 isn't penalised, but nor does it earn the 8.1 score: a remux
+    # title says "DV HDR10" too, and with the bonus every Profile 7 remux
+    # outscored a plain HDR10 one. Played on a Fire TV in the Jellyfin client,
+    # the HDR10 remux direct-plays in HDR while the Profile 7 remux is
+    # transcoded and tone-mapped to SDR (Coraline, Zootopia, The Lighthouse,
+    # 2026-11-10). A remux marked as converted to 8.1 keeps the score.
     local dv_token='{"name":"Dolby Vision","implementation":"ReleaseTitleSpecification","negate":false,"required":true,"fields":[{"name":"value","value":"\\b(dv|dovi|dolby[ .\\-_]?vision)\\b"}]}'
     local hdr_yes='{"name":"HDR10 base layer","implementation":"ReleaseTitleSpecification","negate":false,"required":true,"fields":[{"name":"value","value":"\\bhdr|\\bhlg\\b|\\bpq\\b"}]}'
     local hdr_no='{"name":"No HDR10 fallback","implementation":"ReleaseTitleSpecification","negate":true,"required":true,"fields":[{"name":"value","value":"\\bhdr|\\bhlg\\b|\\bpq\\b"}]}'
     local disc_no='{"name":"Not a disc source","implementation":"ReleaseTitleSpecification","negate":true,"required":true,"fields":[{"name":"value","value":"\\b(blu-?ray|remux|bdrip|bdremux)\\b"}]}'
+    local remux_p7_no="{\"name\":\"Not a Profile 7 remux\",\"implementation\":\"ReleaseTitleSpecification\",\"negate\":true,\"required\":true,\"fields\":[{\"name\":\"value\",\"value\":\"${REMUX_P7_TITLE_RE//\\/\\\\}\"}]}"
 
+    local dv81_score=500
     ensure_custom_format "$BASE" "$AUTH" "$name" "DV (Profile 5)" -1000 \
         "[${dv_token},${hdr_no},${disc_no}]"
-    ensure_custom_format "$BASE" "$AUTH" "$name" "DV HDR10 (Profile 8.1)" 500 \
-        "[${dv_token},${hdr_yes}]"
+    ensure_custom_format "$BASE" "$AUTH" "$name" "DV HDR10 (Profile 8.1)" "$dv81_score" \
+        "[${dv_token},${hdr_yes},${remux_p7_no}]"
+
+    # --- Custom Format: HDR10+ with no Dolby Vision ---
+    #
+    # HDR10+ sits on an HDR10 base layer, yet a display with HDR10 and no
+    # HDR10+ doesn't get direct play: Jellyfin transcodes it, and on a Fire
+    # TV Cube driving an LG BX that froze within seconds. With Dolby Vision
+    # alongside, the player takes the DV and plays it.
+    #
+    # Titles rarely say so. Of 68 HDR10+-only files in one library, 2 titles
+    # said HDR10+ and 66 said "HDR", so the streaming service is the second
+    # signal: Amazon's "HDR" was HDR10+ 36 times in 37, Apple TV+'s and
+    # Paramount+'s every time, Netflix's never. Scene titles name no service
+    # and split 27 HDR10+ to 25 HDR10, so they are left alone, because
+    # refusing them would refuse good HDR10 too. The Dolby Vision upgrade
+    # below is the way out for those. Against that library this refuses 40 of
+    # the 68 and one HDR10 file (an Amazon WEBRip re-encode), and nothing else.
+    local dv_no='{"name":"No Dolby Vision","implementation":"ReleaseTitleSpecification","negate":true,"required":true,"fields":[{"name":"value","value":"\\b(dv|dovi|dolby[ .\\-_]?vision)\\b"}]}'
+    local hdr10p_yes="{\"name\":\"HDR10+\",\"implementation\":\"ReleaseTitleSpecification\",\"negate\":false,\"required\":true,\"fields\":[{\"name\":\"value\",\"value\":\"${HDR10PLUS_TITLE_RE//\\/\\\\}\"}]}"
+    ensure_custom_format "$BASE" "$AUTH" "$name" "HDR10+ (no DV)" -1000 \
+        "[${hdr10p_yes},${dv_no}]"
+
+    # --- Custom Format: DTS 6.1 ---
+    #
+    # X-Men: The Last Stand as a DTS-HD MA 6.1 remux stopped at 0 ms in the
+    # Jellyfin Android TV client on a Fire TV, every time, though ffmpeg
+    # decoded the whole track clean. The client passes DTS through as the
+    # core, and this core is 6.1. A DTS-HD MA 7.1 film, with a 5.1 core,
+    # played. With minFormatScore at 0 the -1000 refuses the release, and the
+    # next one is taken: for that film, a DD 5.1 encode of the same disc.
+    local dts61="{\"name\":\"DTS 6.1\",\"implementation\":\"ReleaseTitleSpecification\",\"negate\":false,\"required\":true,\"fields\":[{\"name\":\"value\",\"value\":\"${DTS_61_TITLE_RE//\\/\\\\}\"}]}"
+    ensure_custom_format "$BASE" "$AUTH" "$name" "DTS 6.1" -1000 \
+        "[${dts61}]"
+
+    # --- Custom Format: foreign dub ahead of the English track (Radarr) ---
+    #
+    # Italian and Turkish groups (CYBER, NAHOM, TURG) re-release English
+    # films with their own dub as the first and default audio track, their
+    # forced subtitles on by default and, at times, English subtitles OCR'd
+    # badly from the disc. A player starts the film in Italian. Against one
+    # library of 192 films the title regex matched 25, every one of them with
+    # a non-English default track, and no English-first release.
+    #
+    # Quality is ranked before score, so without this a dual-audio "BDRemux"
+    # beats every English encode, and ties with a proper English remux at
+    # score 0. With minFormatScore at 0 the -1000 refuses it outright.
+    #
+    # It goes by title, not by Radarr's Language condition. That condition
+    # reads a file's languages from its mediainfo, which takes in the extra
+    # dubs on ordinary English remuxes too (46 of the 192 films), so every
+    # remux would score -1000 against an English-only release and be
+    # upgraded again and again. Sonarr is left out: foreign-language shows
+    # lead with their original track, which is the one wanted.
+    if [[ "$name" == "Radarr" ]]; then
+        local dub_first="{\"name\":\"Dub named before English, or DUAL\",\"implementation\":\"ReleaseTitleSpecification\",\"negate\":false,\"required\":true,\"fields\":[{\"name\":\"value\",\"value\":\"${FOREIGN_DUB_TITLE_RE//\\/\\\\}\"}]}"
+        ensure_custom_format "$BASE" "$AUTH" "$name" "Foreign dub first" -1000 \
+            "[${dub_first}]"
+    fi
+
+    # --- Keep upgrading until a file scores as Dolby Vision 8.1 ---
+    #
+    # The score above only ranks releases at grab time. Profiles are created
+    # with an "Upgrade Until Custom Format Score" of 0, so a file that meets
+    # the quality cutoff at score 0 is finished: when a Profile 8.1 release
+    # turns up later, nothing replaces it. That stranded HDR10+-only 4K WEB
+    # files, which a display with HDR10 but no HDR10+ can't direct-play.
+    # Jellyfin transcodes or remuxes them instead, and on a Fire TV playback
+    # froze within seconds, while the same episode as DV + HDR10+
+    # direct-played.
+    #
+    # The format above refuses the releases whose titles give them away. The
+    # rest say only "HDR", and their HDR10+ metadata shows up in the file's
+    # own mediainfo only after import. For those, upgrading on the Dolby
+    # Vision score is the lever that works.
+    #
+    # It can't loop. An upgrade must raise the score, and the only formats
+    # scored above 0 are 8.1 and the repack formats below, which score less
+    # than 8.1 does. So a file climbs at most a few steps, and an 8.1 file sits
+    # at the cutoff and stays there. A file scores at least what its release
+    # did (the formats match the stored release title as well as the file
+    # name), so importing never drops it back below a release it came from.
+    ensure_cutoff_format_score "$BASE" "$AUTH" "$name" "$dv81_score"
+
+    # --- Propers and repacks: ranked by score, below Dolby Vision 8.1 ---
+    #
+    # The default "Prefer and Upgrade" compares a release's revision before
+    # any custom format score. For an episode of an Apple TV+ show Sonarr
+    # grabbed a scene PROPER titled only "HDR" (score 0: a scene title names
+    # no service, so the HDR10+ format above can't judge it) over seven Dolby
+    # Vision 8.1 releases at 500. Had it imported, no 8.1 release could
+    # replace it: a lower revision is refused before scores are compared, so
+    # the cutoff above never gets a say. "Do not Prefer" with the repacks
+    # scored is the TRaSH set-up: a repack beats its own release and loses to
+    # 8.1. Score the formats first, so repacks are never left with no
+    # preference at all.
+    ensure_custom_format "$BASE" "$AUTH" "$name" "Repack/Proper" 5 \
+        '[{"name":"Repack/Proper/Rerip","implementation":"ReleaseTitleSpecification","negate":false,"required":true,"fields":[{"name":"value","value":"\\b(Repack|Proper|Rerip)\\b"}]},{"name":"Not Higher Version Repack/Proper","implementation":"ReleaseTitleSpecification","negate":true,"required":true,"fields":[{"name":"value","value":"\\b((repack|proper)[23])\\b|\\bREAL\\.(REAL\\.)?(PROPER|REPACK)\\b"}]}]'
+    ensure_custom_format "$BASE" "$AUTH" "$name" "Repack2" 6 \
+        '[{"name":"Repack/Proper 2 or REAL.PROPER/REPACK","implementation":"ReleaseTitleSpecification","negate":false,"required":true,"fields":[{"name":"value","value":"\\b((repack|proper)2)\\b|\\b(REAL\\.(PROPER|REPACK))\\b"}]},{"name":"Not Repack/Proper 3","implementation":"ReleaseTitleSpecification","negate":true,"required":true,"fields":[{"name":"value","value":"\\b((repack|proper)3)\\b|\\bREAL\\.(REAL\\.)(PROPER|REPACK)\\b"}]}]'
+    ensure_custom_format "$BASE" "$AUTH" "$name" "Repack3" 7 \
+        '[{"name":"Repack/Proper 3 or REAL.REAL.PROPER/REPACK","implementation":"ReleaseTitleSpecification","negate":false,"required":true,"fields":[{"name":"value","value":"\\b((repack|proper)3)\\b|\\b(REAL\\.REAL\\.(PROPER|REPACK))\\b"}]}]'
+    ensure_propers_not_preferred "$BASE" "$AUTH" "$name"
 
     # --- Delay profile (if SABnzbd running — prefer Usenet) ---
     if $SABNZBD_RUNNING; then

@@ -177,14 +177,42 @@ Searches for TV shows, sends download links to qBittorrent/SABnzbd, and organize
      - Release Title: `\b(dv|dovi|dolby[ .\-_]?vision)\b`
      - Release Title: `\bhdr|\bhlg\b|\bpq\b` — also check **Negate**
      - Release Title: `\b(blu-?ray|remux|bdrip|bdremux)\b` — also check **Negate**
-   - Settings → Custom Formats → + → Name: `DV HDR10 (Profile 8.1)` — **Regex** and **Required** on both:
+   - Settings → Custom Formats → + → Name: `DV HDR10 (Profile 8.1)` — **Regex** and **Required** on all three:
      - Release Title: `\b(dv|dovi|dolby[ .\-_]?vision)\b`
      - Release Title: `\bhdr|\bhlg\b|\bpq\b`
+     - Release Title: `^(?!.*\b(hybrid|p8|dvp8|for[ .\-_]?lg[ .\-_]?tvs?)\b).*\b(bd)?remux\b(?![^\[]*\])` — also check **Negate**
    - Settings → Profiles → your quality profile → `DV (Profile 5)` = `-1000`, `DV HDR10 (Profile 8.1)` = `500`
+   - Same profile → **Upgrade Until Custom Format Score** = `500`
 
+   > The upgrade-until score is what lets a Profile 8.1 release replace a file you already have. Left at `0`, a file that has reached the quality cutoff counts as finished, however good the release that turns up later. That matters most for HDR10+-only 4K WEB releases whose titles say only `HDR` (step 9 refuses the rest): a display with HDR10 but no HDR10+ (LG's 2020 OLEDs, for example) makes Jellyfin transcode or remux them instead of direct-playing. With the score at `500`, the upgrades it opens are to an 8.1 release or to a repack (step 10, which scores repacks well below 500), and an 8.1 file then sits at the cutoff, so nothing loops.
+   >
    > The disc-source exclusion is deliberate. UHD Blu-ray Dolby Vision is **Profile 7**, whose base layer *is* HDR10-compatible, so penalising it would trade good remuxes for worse WEB rips.
    >
+   > The third 8.1 condition keeps Profile 7 remuxes from earning the 8.1 score: their titles say `DV HDR10` too. The Jellyfin Android TV client on a Fire TV can't play Profile 7, so Jellyfin transcodes it and tone-maps the picture to SDR, while a plain HDR10 remux direct-plays in HDR. A remux marked as converted to 8.1 (`HYBRID`, `P8`, `For LGTVs`) keeps the score. The `(?![^\[]*\])` skips the `[Remux-2160p]` in a file's own name, so a converted remux still scores 500 once it is renamed.
+   >
    > With **Minimum Custom Format Score** left at `0`, the `-1000` makes Profile 5 a reject rather than a preference — the next-best release is taken instead. If you'd rather rank it down without refusing it outright, lower the profile's minimum score below `-1000`.
+
+9. **Refuse HDR10+ without Dolby Vision:** HDR10+ sits on an HDR10 base layer, but a display with HDR10 and no HDR10+ still doesn't get direct play. Jellyfin transcodes it instead, and on a Fire TV Cube driving an LG BX that froze within seconds. With Dolby Vision alongside, the player takes the DV and plays it.
+
+   Titles rarely say so. In one library, 2 of 68 HDR10+-only files came from a title saying `HDR10+`, and 66 from one saying `HDR`. The streaming service is the second signal: Amazon's `HDR` was HDR10+ 36 times in 37, Apple TV+'s and Paramount+'s every time, Netflix's never. Scene titles name no service and split evenly (27 HDR10+, 25 HDR10), so this leaves them alone; refusing them would refuse good HDR10 too. Step 8's upgrade-until score is what replaces those, once a Dolby Vision release appears.
+
+   - Settings → Custom Formats → + → Name: `HDR10+ (no DV)` — check **Regex** and **Required** on both conditions:
+     - Release Title: `(?<!\[)\bhdr10(\+|p\b|[ .\-_]?plus\b)|\b(amzn|atvp|pmtp)\b.*\bhdr\b|\bhdr\b.*\b(amzn|atvp|pmtp)\b`
+     - Release Title: `\b(dv|dovi|dolby[ .\-_]?vision)\b` — also check **Negate**
+   - Settings → Profiles → your quality profile → `HDR10+ (no DV)` = `-1000`
+
+   > Both conditions must be **Required**. A release-title condition left optional counts as matched whenever any other release-title condition in the format matches, so an optional first line would match every release without DV.
+   >
+   > The `(?<!\[)` keeps the file's own name out of it. A custom format matches the file name as well as the release title, and the TRaSH naming scheme writes `[HDR10Plus]` into the name from mediainfo. Without it, a scene `HDR` file would drop to `-1000` once imported, every other release of that episode would look like an upgrade, and each would be downloaded in turn.
+
+10. **Rank repacks by score, not ahead of everything:** Sonarr's default *Prefer and Upgrade* compares a release's revision before its custom format score, so a `PROPER` with no Dolby Vision beats an 8.1 release, and once it's on disk an 8.1 release can never replace it.
+    - Settings → Media Management → *File Management* (Show Advanced) → **Propers and Repacks** = `Do not Prefer`
+    - Settings → Custom Formats → add the three [TRaSH repack formats](https://trash-guides.info/Sonarr/sonarr-collection-of-custom-formats/#repackproper): `Repack/Proper`, `Repack2`, `Repack3`
+    - Settings → Profiles → your quality profile → `Repack/Proper` = `5`, `Repack2` = `6`, `Repack3` = `7`
+
+    > A repack then still replaces its own release, but loses to 8.1. Keep every repack score below the 8.1 score, or "Do not Prefer" puts a PROPER back ahead of Dolby Vision.
+
+11. **Refuse DTS 6.1:** Settings → Custom Formats → + → name `DTS 6.1`, one **Release Title** condition, **Regex** and **Required** ticked, value `(?<!\[)\bdts([ .\-_]?(hd|ma|es))*[ .\-_]?6[ .]1\b|(?<!\[)\bdts[ .\-_]?es\b`. Score it `-1000` in every quality profile. The Jellyfin Android TV client on a Fire TV passes DTS through as the core, and a DTS-HD MA 6.1 track (whose core is 6.1 too) stopped at 0 ms every time, while a 7.1 track with a 5.1 core played. The `(?<!\[)` keeps a file's own `[DTS-HD MA 6.1]` name out of it, so an imported file scores what its release did.
 
 ## 4.5 Radarr (Movies)
 
@@ -225,7 +253,11 @@ Searches for movies, sends download links to qBittorrent/SABnzbd, and organizes 
    - Add condition: Release Title, value `\.iso$`, check **Regex**
    - Settings → Profiles → your quality profile → set `Reject ISO` to `-10000`
 
-8. **Refuse Dolby Vision Profile 5:** same two custom formats and scores as [Sonarr step 8](#44-sonarr-tv-shows) — Radarr needs them independently, and the disc-source exclusion matters more here, since UHD Blu-ray remuxes are Profile 7 and must not be penalised.
+8. **Refuse Dolby Vision Profile 5:** same two custom formats, scores and upgrade-until score as [Sonarr step 8](#44-sonarr-tv-shows) — Radarr needs them independently, and the disc-source exclusion matters more here, since UHD Blu-ray remuxes are Profile 7 and must not be penalised.
+9. **Refuse HDR10+ without Dolby Vision:** the same custom format and score as [Sonarr step 9](#44-sonarr-tv-shows). A UHD Blu-ray with HDR10+ and no Dolby Vision is refused too when its title says so.
+10. **Rank repacks by score:** the same setting, formats and scores as [Sonarr step 10](#44-sonarr-tv-shows) (Radarr's [repack formats](https://trash-guides.info/Radarr/Radarr-collection-of-custom-formats/#repackproper) are the same three).
+11. **Refuse releases that put a dub ahead of English:** Settings → Custom Formats → + → name `Foreign dub first`, one **Release Title** condition, **Required** ticked, value `\b(ita|tr|tur|spa|esp|fre|fra|ger|rus|ukr|hin|pol|por)[ .\-_]+eng?\b|(?<!^)\bdual\b`. Score it `-1000` in every quality profile. Italian and Turkish groups re-release English films as `iTA-ENG`, `Ita.Eng`, `[TR-EN]` or `DUAL`, with their dub as the default track, so the film starts in Italian. Use the title, not a **Language** condition: Radarr reads a file's languages from its mediainfo, so a Language condition also hits English remuxes that carry extra dubs, and they would be re-downloaded over and over. Radarr only: in Sonarr a foreign-language show leads with its original track, which is the one you want.
+12. **Refuse DTS 6.1:** the same custom format and score as [Sonarr step 11](#44-sonarr-tv-shows). Most 6.1 tracks are on films (DTS-ES and DTS-HD MA 6.1 Blu-rays).
 
 ### Prefer Usenet over Torrents (Optional)
 
@@ -337,6 +369,7 @@ Automatically downloads subtitles for your media.
    - **Movies Score Threshold:** On (default 70) — auto-syncs movie subs scoring below this
 
    > **Why:** Jellyfin's web player has no manual subtitle delay control. If subs are out of sync, the only fix is re-timing the subtitle file itself — which is exactly what this does.
+8. **Notifications (optional):** if you use [Home Assistant](HOME-ASSISTANT.md), Settings → Notifications → **JSON**, pointed at the same webhook as everything else ([HOME-ASSISTANT.md, Step 2](HOME-ASSISTANT.md#step-2-point-every-sender-at-it) has the URL). `configure-apps.sh` sets it from `HA_WEBHOOK_URL` in `.env`.
 
 ## 4.9 Pi-hole (DNS)
 

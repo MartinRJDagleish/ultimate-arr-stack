@@ -99,7 +99,7 @@ docker exec gluetun wget -qO- https://ipinfo.io/ip     # Should show VPN IP
 docker exec qbittorrent wget -qO- https://ipinfo.io/ip  # Should match Gluetun's IP
 ```
 
-The `check-vpn.sh` script checks DNS, compares Gluetun's exit IP with the host's own egress (measured from Sonarr, which is off the VPN), and checks that each tunnelled service (qBittorrent, Prowlarr, SABnzbd, FlareSolverr) exits through Gluetun. It exits non-zero on a leak, a DNS failure, or a service it can't measure. You can add it to cron for periodic monitoring:
+The `check-vpn.sh` script checks DNS, compares Gluetun's exit IP with the host's own egress (measured from Sonarr, which is off the VPN), and checks that each tunnelled service (qBittorrent, Prowlarr, SABnzbd, FlareSolverr) exits through Gluetun. It exits non-zero on a leak, a DNS failure, or a service it can't measure. When Gluetun can't reach the internet at all, it also says why, from Gluetun's own log: no server answering for minutes (most likely an expired subscription or a revoked key, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md#vpn-no-server-answers-expired-subscription-revoked-key-or-blocked-udp)), one server failing on its own, or the host's own connection down too. You can add it to cron for periodic monitoring (the Uptime Kuma setup in [UTILITIES.md](UTILITIES.md#the-vpn-check-and-why-it-is-a-push-monitor) also gets you alerted):
 
 ```bash
 # Check every 5 minutes, log failures
@@ -208,6 +208,50 @@ sudo crontab -u <user> /tmp/cron.new
 ```
 
 Prove the webhook once with `--test` and look at the Home Assistant panel: HA answers 200 to any webhook id, so the script's "posted" line only proves the POST arrived. A notice stays in the panel after you fix the requests, until you dismiss it, because nothing is posted on a clean day.
+
+---
+
+## Playback Formats
+
+The custom formats `configure-apps.sh` sets up judge a release by its title, once, when it is grabbed. They never look at a file already on disk, and they can't see a format the title doesn't name. One library held twelve Dolby Vision Profile 5 episodes grabbed before the Profile 5 format existed, and a Simpsons episode whose release was titled `1080p.web.h264` but held 2160p Profile 5. On a Fire TV in the Jellyfin client each one showed a green and magenta picture for the whole episode.
+
+`scripts/check-playback-formats.sh` reads what Sonarr's and Radarr's own mediainfo says each file is, and posts one `info` notice to the Home Assistant panel (tag `playback-formats`) naming the files to replace. It posts nothing when there are none.
+
+```bash
+./scripts/check-playback-formats.sh                 # dry run: report only
+./scripts/check-playback-formats.sh --post          # post the notice if anything is found
+./scripts/check-playback-formats.sh --apply         # queue a search for Profile 5 files
+./scripts/check-playback-formats.sh --post --apply -v
+./scripts/check-playback-formats.sh --test          # post a test notice, to prove the webhook
+```
+
+It reports two formats, the two that failed in the Jellyfin Android TV client on a Fire TV Cube when one of each format in the library was played:
+
+- **Dolby Vision Profile 5** (mediainfo `DV`: Dolby Vision with no HDR10 base layer). The picture is green and magenta. The file scores `-1000` on the `DV (Profile 5)` format through its `[DV]` name, so any release of the same quality without it counts as an upgrade, and `--apply` queues the search that finds one. Netflix and Disney+ publish 4K only as Profile 5, so for their shows the search often takes nothing, because a 1080p release isn't an upgrade. The file is then reported again the next week: pick a 1080p release from its interactive search.
+- **DTS with a 6.1 track** (DTS-ES, DTS-HD MA 6.1). The client passes DTS through as the core, and a 6.1 core stopped at 0 ms. The `DTS 6.1` format reads release titles only, so the file still scores 0 and a search would take nothing. Replace it from the interactive search.
+
+Files with no mediainfo yet are counted but not judged.
+
+These play, but not at their best, so they are not reported. Each was tested on a Fire TV Cube 3rd gen with the Jellyfin Android TV client 0.19.10:
+
+| Format | What happens |
+|---|---|
+| Dolby Vision Profile 7 (UHD Blu-ray remuxes) | Transcoded, picture tone-mapped to SDR. The `DV HDR10 (Profile 8.1)` format no longer scores them. |
+| TrueHD, with or without Atmos | Converted to AAC: lossy, and no Atmos |
+| DTS-HD MA 5.1 and 7.1 | Direct play; the receiver gets the DTS core, not the lossless stream |
+| HDR10+ with no Dolby Vision | Remuxed, video copied; played |
+
+Kodi on the same box passes TrueHD and DTS-HD through to the receiver losslessly, because it packs the bitstream itself.
+
+### Automated (cron)
+
+Weekly is enough: a bad file sits until somebody plays it, and the notice names it before then. Install it the same way as the [stuck-request check](#stuck-requests):
+
+```bash
+crontab -l > /tmp/cron.new
+echo '0 9 * * 0 $NAS_STACK_DIR/scripts/check-playback-formats.sh --post --apply >> $NAS_STACK_DIR/logs/check-playback-formats.log 2>&1' >> /tmp/cron.new
+sudo crontab -u <user> /tmp/cron.new
+```
 
 ---
 
